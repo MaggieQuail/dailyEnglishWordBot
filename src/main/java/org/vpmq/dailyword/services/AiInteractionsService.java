@@ -47,7 +47,7 @@ public class AiInteractionsService {
             .collect(Collectors.joining());
     }
 
-    public InputStream textToSpeech(String text) {
+    public byte[] textToSpeech(String text) {
         SpeechCreateParams speechCreateParams = SpeechCreateParams.builder()
             .input(text)
             .voice("ash")
@@ -55,6 +55,10 @@ public class AiInteractionsService {
             .responseFormat(SpeechCreateParams.ResponseFormat.MP3)
             .build();
         HttpResponse response = client.audio().speech().create(speechCreateParams);
-        return response.body();
+        try (InputStream stream = response.body()) {
+            return stream.readAllBytes();
+        } catch (IOException ex) {
+            throw new RuntimeException(ex);
+        }
     }
 }

@@ -1,5 +1,7 @@
 package org.vpmq.dailyword.services;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.api.methods.send.SendAudio;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
@@ -12,11 +14,15 @@ import org.telegram.telegrambots.meta.api.objects.chatmember.ChatMemberLeft;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
+import org.vpmq.dailyword.models.StateModel;
 import org.vpmq.dailyword.models.SubscriptionModel;
 import org.vpmq.dailyword.models.VocabularyModel;
 import org.vpmq.dailyword.utils.MarkdownEscaper;
 
+import java.io.ByteArrayInputStream;
 import java.io.InputStream;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.*;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -24,27 +30,38 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 public class DailyWordBotService extends TelegramLongPollingBot {
 
+    private static final Logger LOGGER = LogManager.getLogger(DailyWordBotService.class);
+
     private final AiInteractionsService aiInteractions;
     private final SubscriptionService subscriptions;
     private final WordService wordGetter;
+    private final StateService states;
 
     private final ReentrantReadWriteLock rwLock = new ReentrantReadWriteLock();
     private final ReentrantReadWriteLock.WriteLock writeLock = rwLock.writeLock();
     private final ReentrantReadWriteLock.ReadLock readLock = rwLock.readLock();
 
     private VocabularyModel wordOfTheDay;
+    private byte[] wordSound;
+    private StateModel state;
 
     public DailyWordBotService(AiInteractionsService aiInteractions,
                                WordService wordGetter,
                                SubscriptionService subscriptions,
+                               StateService states,
                                ScheduledExecutorService scheduler,
                                String botToken) {
         super(botToken);
         this.aiInteractions = aiInteractions;
         this.subscriptions = subscriptions;
         this.wordGetter = wordGetter;
-        this.wordOfTheDay = wordGetter.getById(1);
+        this.states = states;
+
+        this.state = this.states.getDefault();
+
+        this.wordOfTheDay = wordGetter.getById(this.state.getWordId());
         this.wordOfTheDay.explanation = aiInteractions.wordUsageExamples(wordOfTheDay.word);
+        this.wordSound = aiInteractions.textToSpeech(wordOfTheDay.word);
         this.updateWordOfTheDayPeriodically(scheduler);
     }
 
@@ -55,9 +72,6 @@ public class DailyWordBotService extends TelegramLongPollingBot {
 
     @Override
     public void onUpdateReceived(Update update) {
-//        System.out.println("onUpdateReceived ");
-//        System.out.println(update);
-
         if (update.hasCallbackQuery()) {
             // Got a button push - handle it
             handleCallback(update.getCallbackQuery());
@@ -74,10 +88,11 @@ public class DailyWordBotService extends TelegramLongPollingBot {
 
             // Send a "word of the day" message
             InlineKeyboardMarkup markup = buttonCreation(true, true, true);
-            Message sentMessage = sendText(userId, generateMessageText(false, false), markup);
-
-            // Save message ID in subscriptions table
-            subscriptions.updateLastMessage(userId, sentMessage.getMessageId());
+            Optional<Message> sentMessage = sendText(userId, generateMessageText(false, false), markup);
+            if (sentMessage.isPresent()) {
+                // Save message ID in subscriptions table
+                subscriptions.updateLastMessage(userId, sentMessage.get().getMessageId());
+            }
         }
 
         if (update.hasMyChatMember()) {
@@ -94,19 +109,18 @@ public class DailyWordBotService extends TelegramLongPollingBot {
     }
 
     // Response to client
-    public Message sendText(Long who, String text, InlineKeyboardMarkup keyboard) {
-//        System.out.println("sendText");
+    public Optional<Message> sendText(Long who, String text, InlineKeyboardMarkup keyboard) {
         SendMessage sm = SendMessage.builder()
             .chatId(who.toString())
             .replyMarkup(keyboard)
             .parseMode("MarkdownV2")
             .text(MarkdownEscaper.escape(text)).build();
         try {
-            return execute(sm);
+            return Optional.ofNullable(execute(sm));
         } catch (TelegramApiException e) {
-            e.printStackTrace();
-            throw new RuntimeException(e);
+            LOGGER.error("Failed to send message to user {}", who, e);
         }
+        return Optional.empty();
     }
 
     public InlineKeyboardMarkup buttonCreation(boolean translateNeeded, boolean explainNeeded, boolean soundNeeded) {
@@ -154,7 +168,6 @@ public class DailyWordBotService extends TelegramLongPollingBot {
     }
 
     private void subscribeNewUser(long userId, long chatId) {
-//        System.out.println("subscribeNewUser, userId = " + userId);
         subscriptions.addSubscription(userId, chatId);
     }
 
@@ -188,21 +201,18 @@ public class DailyWordBotService extends TelegramLongPollingBot {
         InlineKeyboardMarkup newKb = hideButton(kb, buttonName);
 
         switch (buttonName) {
-            case "translate" -> {
-                editMessage(targetMessage.getChatId(), targetMessage.getMessageId(), newText, newKb);
-            }
-            case "explain" -> {
-//                System.out.println("Explain button");
+            case "translate", "explain" -> {
                 editMessage(targetMessage.getChatId(), targetMessage.getMessageId(), newText, newKb);
             }
             case "sound" -> {
-//                System.out.println("Sound button");
                 // Hide clicked buttons
                 editMessageMarkup(targetMessage, newKb);
                 // Send a word sound message
-                Message soundMsg = sendWordSound(callback.getMessage().getChatId());
-                // Save word sound message ID in the subscription
-                subscriptions.updateLastSound(callback.getFrom().getId(), soundMsg.getMessageId());
+                Optional<Message> soundMsg = sendWordSound(callback.getMessage().getChatId());
+                if (soundMsg.isPresent()) {
+                    // Save word sound message ID in the subscription
+                    subscriptions.updateLastSound(callback.getFrom().getId(), soundMsg.get().getMessageId());
+                }
             }
         }
     }
@@ -211,6 +221,7 @@ public class DailyWordBotService extends TelegramLongPollingBot {
                              int messageId,
                              String newText,
                              InlineKeyboardMarkup newKb) {
+
         EditMessageText em = EditMessageText.builder()
             .chatId(chatId)
             .messageId(messageId)
@@ -224,8 +235,7 @@ public class DailyWordBotService extends TelegramLongPollingBot {
             if (e.getMessage().contains("message is not modified")) {
                 return;
             }
-            e.printStackTrace();
-            throw new RuntimeException(e);
+            LOGGER.error("Failed to edit message {} in chat {}", messageId, chatId, e);
         }
     }
 
@@ -238,30 +248,41 @@ public class DailyWordBotService extends TelegramLongPollingBot {
         try {
             execute(em);
         } catch (TelegramApiException e) {
-            e.printStackTrace();
-            throw new RuntimeException(e);
+            LOGGER.error(
+                "Failed to edit markup of message {} in chat {}",
+                message.getMessageId(), message.getChatId(), e
+            );
         }
     }
 
-    private Message sendWordSound(Long chatId) {
+    private Optional<Message> sendWordSound(Long chatId) {
         try {
-            InputStream aiResponseText = aiInteractions.textToSpeech(this.wordOfTheDay.word);
-
-            InputFile audioFile = new InputFile(aiResponseText, this.wordOfTheDay.word + ".mp3");
+            InputFile audioFile = new InputFile(
+                new ByteArrayInputStream(this.wordSound),
+                this.wordOfTheDay.word + ".mp3"
+            );
             SendAudio sendAudio = new SendAudio();
             sendAudio.setChatId(String.valueOf(chatId));
             sendAudio.setAudio(audioFile);
 
-            return execute(sendAudio);
+            return Optional.ofNullable(execute(sendAudio));
         } catch (Exception ex) {
-            ex.printStackTrace();
-            throw new RuntimeException(ex);
+            LOGGER.error("Failed to send word sound message to chat {}", chatId, ex);
         }
+        return Optional.empty();
     }
 
     private void updateWordOfTheDayPeriodically(ScheduledExecutorService scheduler) {
+        ZonedDateTime now = ZonedDateTime.now(ZoneId.of("UTC+3"));
+        ZonedDateTime nextRun = now.toLocalDate().atTime(9, 0).atZone(ZoneId.of("UTC+3"));
+        if (!now.isBefore(nextRun)) {
+            nextRun = nextRun.plusDays(1);
+        }
+        long initialDelay = nextRun.toInstant().toEpochMilli() - now.toInstant().toEpochMilli();
+        LOGGER.info("First word update scheduled in {} minutes", TimeUnit.MILLISECONDS.toMinutes(initialDelay));
+
         scheduler.scheduleAtFixedRate(() -> {
-//            System.out.println("Getting next word!!!");
+            LOGGER.info("Running word update");
             writeLock.lock();
             try {
                 // List active subscriptions
@@ -279,24 +300,32 @@ public class DailyWordBotService extends TelegramLongPollingBot {
                 }
                 // Replace word of the day with the next one
                 wordOfTheDay = wordGetter.getById(nextId);
-                this.wordOfTheDay.explanation = aiInteractions.wordUsageExamples(wordOfTheDay.word);
+                wordOfTheDay.explanation = aiInteractions.wordUsageExamples(wordOfTheDay.word);
+                wordSound = aiInteractions.textToSpeech(wordOfTheDay.word);
+
+                // Save current word ID to continue the word sequence after failure or reboot
+                state.setWordId(wordOfTheDay.id);
+                this.states.update(state);
 
                 // Send new word to all subscribed users
+                LOGGER.info("Broadcasting word {}", wordOfTheDay.id);
                 broadcastNewWord(activeSubscriptions);
             } catch (Exception ex) {
-                ex.printStackTrace();
+                LOGGER.error("Daily word update failed", ex);
             } finally {
                 writeLock.unlock();
             }
-        }, 24, 24, TimeUnit.HOURS);
+        }, initialDelay, TimeUnit.DAYS.toMillis(1), TimeUnit.MILLISECONDS);
     }
 
     private void broadcastNewWord(List<SubscriptionModel> activeSubscriptions) {
         InlineKeyboardMarkup markup = buttonCreation(true, true, true);
         String text = generateMessageText(false, false);
         activeSubscriptions.forEach(sub -> {
-            Message sentMessage = sendText(sub.getUserId(), text, markup);
-            subscriptions.updateLastMessage(sub.getUserId(), sentMessage.getMessageId());
+            Optional<Message> sentMessage = sendText(sub.getUserId(), text, markup);
+            if (sentMessage.isPresent()) {
+                subscriptions.updateLastMessage(sub.getUserId(), sentMessage.get().getMessageId());
+            }
         });
     }
 
@@ -315,7 +344,7 @@ public class DailyWordBotService extends TelegramLongPollingBot {
                 execute(delete);
                 subscriptions.updateLastSound(sub.getUserId(), null);
             } catch (Exception ex) {
-                ex.printStackTrace();
+                LOGGER.error("Failed to drop sound message {} in chat {}", lastSoundId, sub.getChatId(), ex);
             }
         });
     }
@@ -328,6 +357,9 @@ public class DailyWordBotService extends TelegramLongPollingBot {
         // Go over subscriptions and finalize old messages - update text and remove buttons
         // for each of them
         activeSubscriptions.forEach(sub -> {
+            if (sub.getLastMsgId() == 0) {
+                return;
+            }
             editMessage(sub.getChatId(), sub.getLastMsgId(), fullText, noButtonsKb);
         });
     }

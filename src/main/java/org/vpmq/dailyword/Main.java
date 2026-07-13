@@ -8,6 +8,7 @@ import org.telegram.telegrambots.meta.TelegramBotsApi;
 import org.telegram.telegrambots.updatesreceivers.DefaultBotSession;
 import org.vpmq.dailyword.services.AiInteractionsService;
 import org.vpmq.dailyword.services.DailyWordBotService;
+import org.vpmq.dailyword.services.StateService;
 import org.vpmq.dailyword.services.SubscriptionService;
 import org.vpmq.dailyword.services.WordService;
 
@@ -31,6 +32,7 @@ public class Main {
             HikariDataSource db = new HikariDataSource(dbCfg);
             WordService wordGetter = new WordService(db);
             SubscriptionService subscriptions = new SubscriptionService(db);
+            StateService states = new StateService(db);
             AiInteractionsService aiInteractions = new AiInteractionsService(client);
 
             TelegramBotsApi telegramBotsApi = new TelegramBotsApi(DefaultBotSession.class);
@@ -38,6 +40,7 @@ public class Main {
                 aiInteractions,
                 wordGetter,
                 subscriptions,
+                states,
                 Executors.newScheduledThreadPool(1),
                 BOT_TOKEN
             ));
