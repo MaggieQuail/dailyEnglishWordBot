@@ -34,7 +34,7 @@ public class AiInteractionsService {
     public String wordUsageExamples(String word) {
         ResponseCreateParams params = ResponseCreateParams.builder()
             .input(this.prompt + word)
-            .model(ChatModel.GPT_4_1_NANO)
+            .model("gpt-5.4-nano")
             .temperature(0.3)
             .build();
         Response response = client.responses().create(params);

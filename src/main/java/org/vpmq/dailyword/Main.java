@@ -15,13 +15,22 @@ import org.vpmq.dailyword.services.WordService;
 import java.util.concurrent.Executors;
 
 public class Main {
-    public static final String GPT_KEY = "";
-    public static final String BOT_TOKEN = "";
     public static final String JDBC_URL = "jdbc:sqlite:/root/c1-english-words.db";
 
     public static void main(String[] args) {
+        String gptKey = System.getenv("GPT_KEY");
+        if (gptKey == null || gptKey.isBlank()) {
+            System.err.println("GPT_KEY env variable is empty");
+            System.exit(1);
+        }
+        String botToken = System.getenv("BOT_TOKEN");
+        if (botToken == null || botToken.isBlank()) {
+            System.err.println("BOT_TOKEN env variable is empty");
+            System.exit(1);
+        }
+
         // Create an OpenAI client
-        OpenAIClient client = OpenAIOkHttpClient.builder().apiKey(GPT_KEY).build();
+        OpenAIClient client = OpenAIOkHttpClient.builder().apiKey(gptKey).build();
 
         // Init DB connection config
         HikariConfig dbCfg = new HikariConfig();
@@ -42,7 +51,7 @@ public class Main {
                 subscriptions,
                 states,
                 Executors.newScheduledThreadPool(1),
-                BOT_TOKEN
+                botToken
             ));
         } catch (Exception ex) {
             ex.printStackTrace();
